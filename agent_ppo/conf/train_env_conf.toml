@@ -1,0 +1,36 @@
+[env_conf]
+# Maps used for training (1-8). Maps 9-10 reserved for validation.
+# 训练地图(1-8)，地图9-10保留给验证集
+map = [1, 2, 3, 4, 5, 6, 7, 8]
+
+# Randomly select maps each episode for better generalization.
+# 每局随机选图以提升泛化能力
+map_random = true
+
+# Treasure count (curriculum will override dynamically).
+# 宝箱数量（课程学习会动态覆盖）
+treasure_count = 10
+
+# Speed buff count.
+# 加速buff数量
+buff_count = 2
+
+# Buff respawn cooldown in steps.
+# buff刷新冷却步数
+buff_cooldown = 200
+
+# Flash skill cooldown in steps.
+# 闪现技能冷却步数
+talent_cooldown = 100
+
+# Second monster interval (curriculum will override).
+# 第二怪物出现间隔（课程学习会动态覆盖）
+monster_interval = 300
+
+# Monster speedup time (curriculum will override).
+# 怪物加速时间（课程学习会动态覆盖）
+monster_speedup = 500
+
+# Max steps per episode, set to 2000 for better late-game training.
+# 每局最大步数，设为2000以更好训练后期生存
+max_step = 2000
