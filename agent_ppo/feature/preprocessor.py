@@ -113,7 +113,8 @@ class Preprocessor:
         self.last_buff_count = 0
         # Position tracking
         self.last_hero_pos = None
-        self.position_history = deque(maxlen=30)
+        # 将防挂机的雷达记录延长至 60 步，防止模型通过画“大圈”或长距离折返跑来绕过检测
+        self.position_history = deque(maxlen=60)
         # Treasure tracking
         self.last_nearest_treasure_dist = None
         # Buff tracking
@@ -124,6 +125,9 @@ class Preprocessor:
         self.last_move_passability = [1.0] * 8
         # First step flag
         self.is_first_step = True
+        # Curiosity & Exploration tracking
+        self.visited_grid = {}
+        self.looping_streak = 0
         # Action tracking for inertia
         self.prev_action = -1
 
@@ -653,7 +657,9 @@ class Preprocessor:
         reward = 0.0
 
         # --- 1. Base survival reward (稠密) ---
-        reward += 0.05  # 提高基础存活奖励，让 Agent 更珍惜生存
+        # 【核心修正】：彻底砍掉 0.05 的高额低保分！
+        # 苟活不该给分，只有探出迷雾或吃到宝箱才应该给发工资。
+        reward += 0.001  # 降至极微弱的心跳分，仅为了区分死亡与存活
 
         # --- 2. Step score reward (稠密) ---
         cur_step_score = hero.get("step_score", self.step_no * 1.5)
@@ -672,7 +678,7 @@ class Preprocessor:
         cur_buff_count = env_info.get("collected_buff", 0)
         buff_diff = cur_buff_count - self.last_buff_count
         if buff_diff > 0:
-            reward += 3.5 * buff_diff  # 极大幅度提高吃Buff的奖励！从1.0拉升到3.5，把Buff的战略地位拉高到接近宝箱的水平
+            reward += 5 * buff_diff  # 极大幅度提高吃Buff的奖励！从1.0拉升到3.5，把Buff的战略地位拉高到接近宝箱的水平
 
         # --- 4b. Buff 接近奖励 ---
         if buffs:
@@ -746,8 +752,9 @@ class Preprocessor:
         if monsters_sped_up:
             reward += 0.005 * min(min_monster_dist / 30.0, 1.0)
 
-        # --- 9. Corridor reward (稠密) ---
-        reward += 0.005 * openness
+        # --- 9. Corridor reward (稠密) [已废弃] ---
+        # 移除单纯走宽阔长廊就给分的机制，防止模型在安全通道内来回刷步数
+        # reward += 0.005 * openness
 
         # --- 10. Pincer penalty (稠密) ---
         if len(monsters) >= 2 and len(monster_dists) >= 2:
@@ -787,13 +794,32 @@ class Preprocessor:
 
         # --- 14. Repeated exploration penalty (稠密) ---
         if is_looping and len(self.position_history) > 5:
+            # 进入复读机状态，连击数累计
+            self.looping_streak = getattr(self, 'looping_streak', 0) + 1
             repeat_count = sum(
                 1 for p in self.position_history
                 if abs(p[0] - h_pos["x"]) + abs(p[1] - h_pos["z"]) < 3
             )
             repeat_ratio = repeat_count / max(len(self.position_history), 1)
-            reward -= 0.1 * repeat_ratio  # 提高反跑动、罚站惩罚，摧毁卡死角刷分模型
-
+            # 持续在一个区域绕圈，惩罚倍率会不断飙升（最多放大至5倍，也就是 -0.5/步 的死刑）
+            streak_multiplier = 1.0 + min(self.looping_streak, 80) / 20.0
+            reward -= 0.1 * repeat_ratio * streak_multiplier
+        else:
+            self.looping_streak = 0
+            
+        # --- 20. Curiosity / Grid Visitation Reward (探图驱散) ---
+        # 像扫地机器人一样，记录全图每个格子的上次踩踏时间。
+        # 只要走到一个超过 100 步没来过的新区域/老区域，就发放探路工资！从而拉断定点刷步数的挂机行为。
+        grid_key = (int(h_pos["x"]), int(h_pos["z"]))
+        if not hasattr(self, 'visited_grid'):
+            self.visited_grid = {}
+        last_visited = self.visited_grid.get(grid_key, -999)
+        
+        if self.step_no - last_visited > 100:
+            reward += 0.05  # 好奇心探图奖励！等同于一个极高优级的吸引力
+            
+        # 刷新足迹时间戳
+        self.visited_grid[grid_key] = self.step_no
         # --- 15 & 16. Flash escape & Wall-crossing reward (稀疏) ---
         if flash_just_used:
             flashed_over_wall = False
