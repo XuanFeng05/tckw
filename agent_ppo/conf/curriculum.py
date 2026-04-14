@@ -27,35 +27,35 @@ CURRICULUM_STAGES = [
         "max_episode": 300,         # 延长预热期，充分学习基础
         "treasure_count": (9, 10),
         "buff_count": (2, 2),         # 比赛规则限制最大为2
-        "monster_interval": (370, 450),
-        "monster_speedup": (550, 650), # 怪物更晚加速，降低早期压力
+        "monster_interval": (420, 500),
+        "monster_speedup": (600, 700), # 怪物更晚加速，降低早期压力
         "max_step": 2000,
     },
     {
         "name": "mid_pressure",
-        "max_episode": 500,        # 给足中压阶段训练时间
+        "max_episode": 300,        # 给足中压阶段训练时间
         "treasure_count": (8, 10),
-        "buff_count": (1, 2),
-        "monster_interval": (310, 430),
-        "monster_speedup": (390, 570),
+        "buff_count": (2, 2),
+        "monster_interval": (360, 480),
+        "monster_speedup": (440, 620),
         "max_step": 2000,
     },
     {
         "name": "late_survival",
-        "max_episode": 500,        # 延长高压训练
+        "max_episode": 300,        # 延长高压训练
         "treasure_count": (7, 10),
-        "buff_count": (1, 2),
-        "monster_interval": (270, 370),
-        "monster_speedup": (330, 470),
+        "buff_count": (2, 2),
+        "monster_interval": (320, 420),
+        "monster_speedup": (380, 520),
         "max_step": 2000,
     },
     {
         "name": "hard_generalization",
         "max_episode": float("inf"),
         "treasure_count": (6, 10),
-        "buff_count": (0, 2),
-        "monster_interval": (270, 470),
-        "monster_speedup": (290, 570),
+        "buff_count": (2, 2),
+        "monster_interval": (320, 520),
+        "monster_speedup": (340, 620),
         "max_step": 2000,
     },
 ]
@@ -134,10 +134,10 @@ def get_val_config(base_conf):
     env_conf["map_random"] = True
     env_conf["treasure_count"] = 10
     env_conf["buff_count"] = 2
-    env_conf["monster_interval"] = 300
-    env_conf["monster_speedup"] = 500
+    env_conf["monster_interval"] = 500
+    env_conf["monster_speedup"] = 700
     env_conf["max_step"] = 1000
-    env_conf["buff_cooldown"] = 200
+    env_conf["buff_cooldown"] = 100
     env_conf["talent_cooldown"] = 100
 
     return conf

@@ -668,14 +668,11 @@ class Preprocessor:
             chests_collected = t_score_diff / 100.0
             reward += 5.0 * chests_collected  # 极致诱惑：将宝箱价值拉升到“命可以不要，宝箱必须吃”的高度
 
-        # --- 4. Buff拾取与管理奖励 (资源囤积) ---
+        # --- 4. Buff拾取与管理奖励 (资源战略) ---
         cur_buff_count = env_info.get("collected_buff", 0)
-        if cur_buff_count > self.last_buff_count:
-            buff_diff = cur_buff_count - self.last_buff_count
-            if is_high_pressure:
-                reward += 0.8 * buff_diff  # 高压期吃 buff：救命神技，重赏！
-            else:
-                reward += 0.1 * buff_diff  # 低压期吃 buff：顺手可以，但仍不如留到危急时刻
+        buff_diff = cur_buff_count - self.last_buff_count
+        if buff_diff > 0:
+            reward += 3.5 * buff_diff  # 极大幅度提高吃Buff的奖励！从1.0拉升到3.5，把Buff的战略地位拉高到接近宝箱的水平
 
         # --- 4b. Buff 接近奖励 ---
         if buffs:
@@ -685,14 +682,13 @@ class Preprocessor:
 
         if (nearest_b_dist is not None and self.last_nearest_buff_dist is not None):
             b_delta = self.last_nearest_buff_dist - nearest_b_dist
-            b_delta_clipped = max(min(b_delta, 3.0), -3.0)  # 双向截断防止闪现暴增暴涨
+            b_delta_clipped = max(min(b_delta, 3.0), -3.0)  # 双向截断防止闪现突变
             
-            if is_high_pressure:
-                reward += 0.03 * b_delta_clipped  # 高压：严格对齐进退双向梯度
+            # 统一拉高趋向分（与宝箱同等级别待遇），让模型在安全区间里也去积极巡航找 Buff
+            if min_monster_dist > 18:
+                reward += 0.04 * b_delta_clipped
             else:
-                reward += 0.01 * b_delta_clipped  # 低压：顺手就捎上
-            if not is_high_pressure and nearest_b_dist is not None and 0 < nearest_b_dist <= 5:
-                reward += 0.005
+                reward += 0.02 * b_delta_clipped
 
         # --- 5. Treasure approach reward (稠密，无条件激励) ---
         if treasures:
@@ -710,6 +706,13 @@ class Preprocessor:
             else:
                 reward += 0.02 * delta_clipped
 
+        # --- 19. 宏观方向惯性 (探索连贯性) ---
+        # 防止无目的的原地打转，鼓励走出直线探索路网
+        # 修复Bug：绝对安全时才给惯性分，否则会为了这 0.005 的奖励顶着怪的靠近惩罚硬走直线
+        if not is_stuck and min_monster_dist > 18.0:
+            if last_action == self.prev_action and 0 <= last_action <= 7:
+                reward += 0.005 # 极小额奖励，打败随机震荡
+
         # --- 4c. Buff efficiency reward (稠密, reward good use of buff) ---
         buff_remaining = hero.get("buff_remaining_time", 0)
         if buff_remaining > 0:
@@ -725,12 +728,9 @@ class Preprocessor:
 
         # --- 6. Monster distance shaping (稠密, CORE signal) ---
         dist_norm = _norm(min_monster_dist, DIAG)
-        # 视野内无危险时（>18），不再受距离拉踩加分诱惑，防止为了无意义的安全距离跑进死角反复横跳
-        if min_monster_dist > 18:
-            shaping = 0.0
-        else:
-            pressure_weight = 0.3 + 0.4 * float(is_high_pressure)  # 加大核心稠密信号
-            shaping = pressure_weight * (dist_norm - self.last_min_monster_dist_norm)
+        # 移除原先的按处境动态调整权重的算法（这产生了一个非保守势场，导致模型越界套利——故意把怪放近了再跑到边界外吃高额距离差价）
+        # 将权重固定为 0.5，符合严格的 Potential-based Shaping 守恒定律
+        shaping = 0.5 * (dist_norm - getattr(self, 'last_min_monster_dist_norm', dist_norm))
         reward += shaping
 
         # --- 7. Pre-speedup buffer reward (稠密) ---
@@ -763,11 +763,10 @@ class Preprocessor:
                 severity = (angle / np.pi) * min(1, 30 / d1) * min(1, 40 / d2)
                 reward -= 0.03 * severity
 
-        # --- 11. Dead-end penalty (稠密) ---
-        if is_dead_end:
-            reward -= 0.05
-        elif sum(ray_feats) < 2.0:
-            reward -= 0.02
+        # --- 11. Dead-end penalty (稠密) [已废弃] ---
+        # 移除原先 -0.15/-0.08 的死胡同盲惩罚。
+        # 原算法会把L型拐角走廊和地图边缘全部误判为死地，导致模型走路卡顿！
+        # 防死角罚站机制目前靠更加精准的 is_looping (原地打转) 惩罚来处理即可。
 
         # --- 12. Danger penalty (稠密) ---
         danger_threshold = 8.0 if not monsters_sped_up else 12.0
@@ -778,13 +777,13 @@ class Preprocessor:
         # --- 13. Wall collision / ineffective movement penalty (稀疏) ---
         flash_just_used = (8 <= last_action <= 15) if last_action >= 0 else False
         if is_stuck and not flash_just_used:
-            reward -= 0.1  # 大幅加重普通撞墙惩罚，但免除闪现撞墙的额外惩罚（鼓励勇敢尝试交闪）
+            reward -= 0.5  # 极其严厉的惩罚！原地发呆或者撞墙，相当于直接白交一个闪现的罪过！
 
         # --- 13b. Chose a blocked direction penalty (稀疏) ---
         # 如果上一步选了明知不通的方向，额外惩罚
         if (0 <= last_action <= 7) and hasattr(self, 'last_move_passability'):
             if self.last_move_passability[last_action] < 0.5:
-                reward -= 0.08
+                reward -= 0.5  # 严禁手动操作往墙上撞！
 
         # --- 14. Repeated exploration penalty (稠密) ---
         if is_looping and len(self.position_history) > 5:
@@ -793,9 +792,8 @@ class Preprocessor:
                 if abs(p[0] - h_pos["x"]) + abs(p[1] - h_pos["z"]) < 3
             )
             repeat_ratio = repeat_count / max(len(self.position_history), 1)
-            reward -= 0.02 * repeat_ratio  # 提高惩罚力度，逼迫探索新区域
+            reward -= 0.1 * repeat_ratio  # 提高反跑动、罚站惩罚，摧毁卡死角刷分模型
 
-        # --- 15 & 16. Flash escape & Wall-crossing reward (稀疏) ---
         # --- 15 & 16. Flash escape & Wall-crossing reward (稀疏) ---
         if flash_just_used:
             flashed_over_wall = False
@@ -825,22 +823,34 @@ class Preprocessor:
                                 flashed_over_wall = True
                                 break
 
+            # 评估闪现的效果
             dist_improvement = min_monster_dist - self.last_min_monster_raw_dist
             openness_improvement = openness - self.last_openness
             
-            # 史诗级奖励：成功用闪现穿过障碍物，按局势发奖！
-            if flashed_over_wall:
-                if is_high_pressure:
-                    reward += 1.5  # 战时：极限翻墙逃生，继续给予救命重赏！
-                else:
-                    reward += 0.2  # 和平期：跑酷穿墙只给极其微小的奖励，不再值得交掉技能
+            # 是否真正拿到了资源 (宝箱或buff)
+            got_loot = ('t_score_diff' in locals() and t_score_diff > 0) or ('buff_diff' in locals() and buff_diff > 0)
+            
+            # 闪现的威慑条件收紧：“被怪追”才算（怪物距离极近，具有真实威胁，而不是瞎猫碰上死耗子远远在视野外）
+            monster_is_chasing_me = self.last_min_monster_raw_dist <= 10.0
+            
+            valid_flash = False
+            
+            # 1. 真正在被怪追杀时，成功越墙逃生
+            if flashed_over_wall and monster_is_chasing_me:
+                reward += 1.5
+                valid_flash = True
 
-            # 闪现脱险判定（英雄闪现8-10格，怪最高追5格，若真正向外逃生或翻墙，拉开距离应显著起效）
-            # 提高脱险判定阈值，防止平地乱交闪现随便白嫖 1.5 奖励
-            if dist_improvement > 3.0 or (openness_improvement > 0.1 and min_monster_dist > 5):
-                reward += 1.5  # 闪现救命/破局奖励，大幅提升
-            elif not flashed_over_wall:
-                # 既没脱险也没穿墙的平地白交闪现，给予严重的浪费技能扣分
+            # 2. 真正在被怪追杀时，成功用闪现拉开身位/逃出局限死角
+            if monster_is_chasing_me and (dist_improvement > 3.0 or (openness_improvement > 0.1 and min_monster_dist > 5)):
+                reward += 1.5
+                valid_flash = True
+                
+            # 3. 闪现带来了资源收益（拿到宝箱或 Buff）
+            if got_loot:
+                valid_flash = True
+                
+            # 惩罚结算：如果一没有合法过墙脱险(视野内)、二没脱险、三没拿到奖励资源 -> 重罚！
+            if not valid_flash:
                 reward -= 0.5
 
         # --- 17. Second monster pressure (稠密) ---
@@ -854,10 +864,7 @@ class Preprocessor:
         if self.step_no > self.max_step * 0.15 and flash_available:
             reward += 0.002
             
-        # --- 19. Directional Inertia (宏观探索动量) ---
-        # 鼓励走直线探索，避免无危险时原地左右摇摆、乱转圈
-        if getattr(self, 'prev_action', -1) == last_action and 0 <= last_action <= 7:
-            reward += 0.005
+
 
         return [reward]
 

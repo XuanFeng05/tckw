@@ -234,6 +234,10 @@ class EpisodeRunner:
                                 "total_score": round(
                                     env_info_final.get("total_score", 0), 1
                                 ),
+                                "val_score": round(
+                                    env_info_final.get("total_score", 0), 1
+                                ),
+                                "val_buff": env_info_final.get("collected_buff", 0),
                             }
                             self.monitor.put_data({os.getpid(): val_data})
                             self.last_report_val_time = now

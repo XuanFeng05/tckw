@@ -89,6 +89,26 @@ def build_monitor():
             expr="avg(val_reward{})",
         )
         .end_panel()
+        .add_panel(
+            name="验证集总得分",
+            name_en="val_score",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="val_score",
+            expr="avg(val_score{})",
+        )
+        .end_panel()
+        .add_panel(
+            name="验证集吃Buff数",
+            name_en="val_buff",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="val_buff",
+            expr="avg(val_buff{})",
+        )
+        .end_panel()
         # ===== Game Metrics / 对局指标 =====
         .add_panel(
             name="存活步数",
