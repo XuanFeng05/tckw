@@ -116,12 +116,18 @@ class Algorithm:
         # Masked softmax / 合法动作掩码 softmax
         prob_dist = self._masked_softmax(logits, legal_action)
 
+        # ---------------------------------------------------------
+        # PPO 核心提速点: Advantage Normalization (优势函数归一化)
+        # ---------------------------------------------------------
+        adv = advantage.view(-1, 1)
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
         # Policy loss (PPO Clip) / 策略损失
         one_hot = torch.nn.functional.one_hot(old_action[:, 0].long(), self.label_size).float()
         new_prob = (one_hot * prob_dist).sum(1, keepdim=True)
         old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp(1e-9)
         ratio = new_prob / old_action_prob
-        adv = advantage.view(-1, 1)
+        
         policy_loss1 = -ratio * adv
         policy_loss2 = -ratio.clamp(1 - self.clip_param, 1 + self.clip_param) * adv
         policy_loss = torch.maximum(policy_loss1, policy_loss2).mean()

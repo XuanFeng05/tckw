@@ -24,7 +24,7 @@ import random
 CURRICULUM_STAGES = [
     {
         "name": "warmup_stable",
-        "max_episode": 300,         # 延长预热期，充分学习基础
+        "max_episode": 300,         # 0~300: 延长预热期，充分学习基础
         "treasure_count": (9, 10),
         "buff_count": (2, 2),         # 比赛规则限制最大为2
         "monster_interval": (420, 500),
@@ -33,7 +33,7 @@ CURRICULUM_STAGES = [
     },
     {
         "name": "mid_pressure",
-        "max_episode": 300,        # 给足中压阶段训练时间
+        "max_episode": 800,         # 301~800: 给足中压阶段训练时间 (修正了累加bug)
         "treasure_count": (8, 10),
         "buff_count": (2, 2),
         "monster_interval": (360, 480),
@@ -42,7 +42,7 @@ CURRICULUM_STAGES = [
     },
     {
         "name": "late_survival",
-        "max_episode": 300,        # 延长高压训练
+        "max_episode": 1300,        # 801~1300: 延长高压训练 (修正了累加bug)
         "treasure_count": (7, 10),
         "buff_count": (2, 2),
         "monster_interval": (320, 420),
@@ -51,7 +51,7 @@ CURRICULUM_STAGES = [
     },
     {
         "name": "hard_generalization",
-        "max_episode": float("inf"),
+        "max_episode": float("inf"),# 1300+: 完全泛化
         "treasure_count": (6, 10),
         "buff_count": (2, 2),
         "monster_interval": (320, 520),
@@ -104,7 +104,16 @@ def get_curriculum_config(episode_cnt, base_conf):
     env_conf["buff_count"] = random.randint(*stage["buff_count"])
     env_conf["monster_interval"] = random.randint(*stage["monster_interval"])
     env_conf["monster_speedup"] = random.randint(*stage["monster_speedup"])
-    env_conf["max_step"] = stage["max_step"]
+    
+    # 引入 max_step 混训：50% 1000步(官方目标)，30% 1200步，20% 2000步(保鲁棒性)
+    rand_step = random.random()
+    if rand_step < 0.5:
+        env_conf["max_step"] = 1000
+    elif rand_step < 0.8:
+        env_conf["max_step"] = 1200
+    else:
+        env_conf["max_step"] = stage.get("max_step", 2000)
+
     env_conf["map"] = TRAIN_MAPS
     env_conf["map_random"] = True
 
@@ -134,10 +143,12 @@ def get_val_config(base_conf):
     env_conf["map_random"] = True
     env_conf["treasure_count"] = 10
     env_conf["buff_count"] = 2
-    env_conf["monster_interval"] = 500
-    env_conf["monster_speedup"] = 700
-    env_conf["max_step"] = 1000
-    env_conf["buff_cooldown"] = 100
-    env_conf["talent_cooldown"] = 100
+    
+    # 修改验证集配置，严格对齐官方默认难度
+    env_conf["monster_interval"] = 300      # 官方：300步出第一怪
+    env_conf["monster_speedup"] = 500       # 官方：500步第一怪加速
+    env_conf["max_step"] = 1000             # 官方默认结束步数
+    env_conf["buff_cooldown"] = 200         # 官方默认 buff CD
+    env_conf["talent_cooldown"] = 100       # 官方闪现 CD
 
     return conf

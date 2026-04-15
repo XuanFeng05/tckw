@@ -131,25 +131,28 @@ class Agent(BaseAgent):
         return int(action[0])
 
     def _run_model(self, feature, legal_action):
-        """Run model inference, return logits, value, prob.
-
-        执行模型推理，返回 logits、value 和动作概率。
-        """
+        """Run model inference, return logits, value, prob."""
         self.model.set_eval_mode()
-        obs_tensor = torch.tensor(np.array([feature]), dtype=torch.float32).to(self.device)
+        
+        # 显式转换为 numpy 数组并增加 Batch 维度 (1, 2724)
+        feature_np = np.array(feature, dtype=np.float32)
+        if feature_np.ndim == 1:
+            feature_np = np.expand_dims(feature_np, axis=0)
+            
+        obs_tensor = torch.from_numpy(feature_np).to(self.device)
 
         with torch.no_grad():
             logits, value = self.model(obs_tensor, inference=True)
 
-        logits_np = logits.cpu().numpy()[0]
-        value_np = value.cpu().numpy()[0]
+        # 确保取回第0个 batch 的结果，避免维度降级导致后续计算错误
+        logits_np = logits.cpu().numpy().reshape(-1)
+        value_np = value.cpu().numpy().reshape(-1)[0]
 
-        # Legal action masked softmax / 合法动作掩码 softmax
+        # Legal action masked softmax
         legal_action_np = np.array(legal_action, dtype=np.float32)
         prob = self._legal_soft_max(logits_np, legal_action_np)
 
         return logits_np, value_np, prob
-
     def _legal_soft_max(self, input_hidden, legal_action):
         """Softmax with legal action masking (numpy).
 

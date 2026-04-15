@@ -46,8 +46,8 @@ class Config:
     MAP_SIDE = 21
 
     # Total observation dimension
-    DIM_OF_OBSERVATION = SCALAR_LEN + (MAP_SIDE * MAP_SIDE)  # 519
-
+    # DIM_OF_OBSERVATION = SCALAR_LEN + (MAP_SIDE * MAP_SIDE)  # 519
+    DIM_OF_OBSERVATION = 2724
     # ======================== Action Space ========================
     # 16 actions: 8 move + 8 flash / 16个动作：8个移动 + 8个闪现
     ACTION_NUM = 16
