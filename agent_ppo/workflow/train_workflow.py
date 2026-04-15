@@ -158,12 +158,18 @@ class EpisodeRunner:
                     total_score = env_info.get("total_score", 0)
                     treasure_score = env_info.get("treasure_score", 0)
 
+                    # 不再把 truncated 直接视为胜利
+                    # terminated: 明确死亡/失败
+                    # truncated: 回合因步数等原因结束，按中性处理
                     if terminated:
                         final_reward[0] = -10.0
                         result_str = "FAIL"
+                    elif truncated:
+                        final_reward[0] = 0.0
+                        result_str = "TRUNC"
                     else:
-                        final_reward[0] = 10.0
-                        result_str = "WIN"
+                        final_reward[0] = 0.0
+                        result_str = "DONE"
 
                     prefix = "[VAL]" if is_val else "[TRAIN]"
                     self.logger.info(

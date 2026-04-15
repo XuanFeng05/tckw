@@ -76,18 +76,26 @@ class Preprocessor:
         self.max_step = 1000
         self.last_min_monster_dist_norm = 1.0
         self.last_min_monster_raw_dist = DIAG
-        
+
         self.last_total_score = 0.0
         self.last_hero_pos = None
         self.position_history = deque(maxlen=60)
-        
+
         self.last_nearest_treasure_dist = None
         self.last_nearest_buff_dist = None
         self.last_openness = 0.5
         self.last_move_passability = [1.0] * 8
         self.is_first_step = True
         self.prev_action = -1
-        
+
+        # 用于奖励计算的历史量
+        self.last_collected_buff = 0
+        self.last_buff_remaining = 0
+        self.last_flash_cd = 0
+        self.last_visit_age = 999.0
+        self.last_pincer_pressure = 0.0
+        self.last_min_exit_monster_dist = DIAG
+
         # 全局记忆矩阵：用于建立探索热图 (128x128)
         self.visited_time = np.full((128, 128), -1, dtype=np.int32)
 
@@ -117,10 +125,15 @@ class Preprocessor:
         organs = frame_state.get("organs", [])
         legal_act_raw = self._get_legal_act(observation, hero)
 
-        # 记录全图访问记忆 (更新中心点)
+        # 先读取当前位置“上次来过多久”，后续 reward 要用
         hz, hx = int(h_pos["z"]), int(h_pos["x"])
+        visit_age = 999.0
         if 0 <= hz < 128 and 0 <= hx < 128:
-            self.visited_time[hz][hx] = self.step_no
+            last_visit_step = self.visited_time[hz][hx]
+            if last_visit_step >= 0:
+                visit_age = float(self.step_no - last_visit_step)
+            else:
+                visit_age = 999.0
 
         flash_available = any(legal_act_raw[i] for i in range(8, 16))
         displacement = _compute_dist(h_pos, self.last_hero_pos) if self.last_hero_pos else 1.0
@@ -142,7 +155,43 @@ class Preprocessor:
 
         monsters_sped_up = any(m.get("speed", 1) > 1 for m in monsters) if monsters else False
         second_monster_active = len(monsters) >= 2
-        is_high_pressure = min_monster_dist < 15.0 or monsters_sped_up
+
+        # 包夹压力：两怪都较近且夹角越接近 180 度越危险
+        pincer_pressure = 0.0
+        if len(monsters) >= 2 and len(monster_dists) >= 2:
+            v1 = (monsters[0]["pos"]["x"] - h_pos["x"], monsters[0]["pos"]["z"] - h_pos["z"])
+            v2 = (monsters[1]["pos"]["x"] - h_pos["x"], monsters[1]["pos"]["z"] - h_pos["z"])
+            cos_a = np.clip(
+                (v1[0] * v2[0] + v1[1] * v2[1]) / ((monster_dists[0] + 1e-6) * (monster_dists[1] + 1e-6)),
+                -1.0,
+                1.0,
+            )
+            opposite_score = np.clip((-cos_a - 0.2) / 0.8, 0.0, 1.0)  # 越接近相对方向越高
+            close_score = np.clip((18.0 - max(monster_dists[0], monster_dists[1])) / 10.0, 0.0, 1.0)
+            pincer_pressure = opposite_score * close_score
+
+        # 出口封锁压力：面向可走方向时，那个方向上最近怪物的投影距离
+        min_exit_monster_dist = DIAG
+        for i, (dr, dc) in enumerate(MOVE_DELTAS):
+            vx, vz = float(dc), float(dr)
+            v_norm = np.sqrt(vx * vx + vz * vz) + 1e-6
+            vx, vz = vx / v_norm, vz / v_norm
+            for m in monsters:
+                mx = m["pos"]["x"] - h_pos["x"]
+                mz = m["pos"]["z"] - h_pos["z"]
+                proj = mx * vx + mz * vz
+                lateral = abs(mx * vz - mz * vx)
+                if proj > 0.0 and lateral < 2.5:
+                    min_exit_monster_dist = min(min_exit_monster_dist, proj)
+
+        # 高压判定不再只看最近怪距离
+        pressure_score = max(
+            np.clip((15.0 - min_monster_dist) / 8.0, 0.0, 1.0),
+            1.0 if monsters_sped_up else 0.0,
+            pincer_pressure,
+            np.clip((8.0 - min_exit_monster_dist) / 5.0, 0.0, 1.0),
+        )
+        is_high_pressure = pressure_score > 0.35
 
         treasures = [o for o in organs if o.get("sub_type", 0) == 1 and o.get("status", 0) == 1]
         buffs = [o for o in organs if o.get("sub_type", 0) == 2 and o.get("status", 0) == 1]
@@ -152,12 +201,24 @@ class Preprocessor:
         is_dead_end = sum(ray_feats) < 1.5
 
         hero_speed = 2 if hero.get("buff_remaining_time", 0) > 0 else 1
-        
+
         # [修Bug] 正确计算加速状态下的路况
         move_passability = self._compute_move_passability(map_info, hero_speed)
         for i in range(8):
             if move_passability[i] == 0.0:  # 彻底不可走才屏蔽，0.5代表只能走1格（合法）
                 legal_act_raw[i] = False
+
+        # 仅在“非常安全”时收紧闪现，不做一刀切硬封
+        very_safe = (
+            min_monster_dist > 20.0
+            and pincer_pressure < 0.15
+            and min_exit_monster_dist > 10.0
+            and not monsters_sped_up
+        )
+        if very_safe:
+            for i in range(8, 16):
+                legal_act_raw[i] = False
+
         if not any(legal_act_raw):
             legal_act_raw[0] = True
 
@@ -177,15 +238,41 @@ class Preprocessor:
         total_feature = np.concatenate([scalar_feature, map_img])
 
         total_reward = self._compute_reward(
-            hero, env_info, min_monster_dist, is_high_pressure, is_stuck,
-            treasures, buffs, h_pos, last_action, flash_available
+            hero=hero,
+            env_info=env_info,
+            min_monster_dist=min_monster_dist,
+            is_high_pressure=is_high_pressure,
+            is_stuck=is_stuck,
+            treasures=treasures,
+            buffs=buffs,
+            h_pos=h_pos,
+            last_action=last_action,
+            flash_available=flash_available,
+            move_passability=move_passability,
+            visit_age=visit_age,
+            pincer_pressure=pincer_pressure,
+            min_exit_monster_dist=min_exit_monster_dist,
+            monsters=monsters,
         )
 
         self._update_state(
-            h_pos, min_monster_dist, openness,
-            last_action, hero, env_info, treasures, buffs,
-            move_passability
+            h_pos=h_pos,
+            min_monster_dist=min_monster_dist,
+            openness=openness,
+            last_action=last_action,
+            hero=hero,
+            env_info=env_info,
+            treasures=treasures,
+            buffs=buffs,
+            move_passability=move_passability,
+            visit_age=visit_age,
+            pincer_pressure=pincer_pressure,
+            min_exit_monster_dist=min_exit_monster_dist,
         )
+
+        # 最后再更新 visited_time，避免探索奖励失效
+        if 0 <= hz < 128 and 0 <= hx < 128:
+            self.visited_time[hz][hx] = self.step_no
 
         return total_feature, [int(b) for b in legal_act_raw], total_reward
 
@@ -389,51 +476,149 @@ class Preprocessor:
     # ================================================================
     # Reward Backbone Redesign
     # ================================================================
-    def _compute_reward(self, hero, env_info, min_monster_dist, is_high_pressure, is_stuck, treasures, buffs, h_pos, last_action, flash_available):
-        if self.is_first_step: return [0.0]
-        
-        # 1. 主心骨: 分数增量 (步数分+宝箱分)
-        cur_score = hero.get("step_score", self.step_no*1.5) + hero.get("treasure_score", 0)
+
+    def _compute_reward(
+        self,
+        hero,
+        env_info,
+        min_monster_dist,
+        is_high_pressure,
+        is_stuck,
+        treasures,
+        buffs,
+        h_pos,
+        last_action,
+        flash_available,
+        move_passability,
+        visit_age,
+        pincer_pressure,
+        min_exit_monster_dist,
+        monsters,
+    ):
+        if self.is_first_step:
+            return [0.0]
+
+        # ------------------------------------------------
+        # 1) 主奖励：分数增量
+        # ------------------------------------------------
+        cur_score = hero.get("step_score", self.step_no * 1.5) + hero.get("treasure_score", 0)
         score_delta = cur_score - self.last_total_score
-        reward = score_delta / 100.0  # 宝箱通常+1.0，苟活通常+0.015
-        
-        # 2. 局部启发 (Shaping): 鼓励向目标移动 (仅在低压下生效，防止顶着怪物贪财)
+        reward = score_delta / 100.0
+
+        flash_used = 8 <= last_action <= 15
+        buff_remaining = hero.get("buff_remaining_time", 0)
+        cur_collected_buff = env_info.get("collected_buff", 0)
+
+        nearest_t = min([_compute_dist(h_pos, t["pos"]) for t in treasures]) if treasures else None
+        nearest_b = min([_compute_dist(h_pos, b["pos"]) for b in buffs]) if buffs else None
+
+        # ------------------------------------------------
+        # 2) 低压下：鼓励拿宝箱，但更强地鼓励吃 buff
+        # ------------------------------------------------
         if not is_high_pressure:
-            nearest_t = min([_compute_dist(h_pos, t["pos"]) for t in treasures]) if treasures else None
             if nearest_t is not None and self.last_nearest_treasure_dist is not None:
-                delta = self.last_nearest_treasure_dist - nearest_t
-                reward += 0.02 * np.clip(delta, -2.0, 2.0)
-                
-            nearest_b = min([_compute_dist(h_pos, b["pos"]) for b in buffs]) if buffs else None
+                delta_t = self.last_nearest_treasure_dist - nearest_t
+                reward += 0.02 * np.clip(delta_t, -2.0, 2.0)
+
             if nearest_b is not None and self.last_nearest_buff_dist is not None:
                 delta_b = self.last_nearest_buff_dist - nearest_b
-                reward += 0.01 * np.clip(delta_b, -2.0, 2.0)
-                
-        # 3. 逃生启发 (Shaping): 在高压下鼓励拉远距离
+                reward += 0.04 * np.clip(delta_b, -2.0, 2.0)
+
+        # 吃到 buff 的瞬时奖励：必须明确拉高价值
+        if cur_collected_buff > self.last_collected_buff:
+            reward += 1.2
+
+        # buff 生效期间，给一点轻微正反馈，鼓励利用 buff 去探图/脱险
+        if buff_remaining > 0:
+            reward += 0.01
+
+        # ------------------------------------------------
+        # 3) 高压下：鼓励脱离危险，不再贪目标
+        # ------------------------------------------------
         if is_high_pressure:
             dist_diff = min_monster_dist - self.last_min_monster_raw_dist
-            reward += 0.05 * np.clip(dist_diff, -2.0, 2.0)
-            
-        # 4. 惩罚: 卡墙或原地不动
-        flash_used = 8 <= last_action <= 15
+            reward += 0.06 * np.clip(dist_diff, -2.5, 2.5)
+
+            # 包夹压力上升要罚，下降给正反馈
+            reward += 0.10 * (self.last_pincer_pressure - pincer_pressure)
+
+            # 出口封锁缓解也给正反馈
+            exit_relief = np.clip(min_exit_monster_dist - self.last_min_exit_monster_dist, -3.0, 3.0)
+            reward += 0.03 * exit_relief
+
+        # ------------------------------------------------
+        # 4) 探索奖励：鼓励新路、避免死胡同隔墙等死
+        # ------------------------------------------------
+        # 首次访问 / 很久没来过，给正反馈
+        if visit_age >= 999.0:
+            reward += 0.08
+        elif visit_age > 40.0:
+            reward += 0.04
+        elif visit_age < 6.0:
+            reward -= 0.02
+
+        # 路很窄且长期原地磨蹭，额外处罚
+        open_dirs = sum(1 for x in move_passability if x > 0.0)
+        if open_dirs <= 2 and is_stuck and not flash_used:
+            reward -= 0.08
+
+        # ------------------------------------------------
+        # 5) 卡住惩罚：buff 期间宽松处理
+        # ------------------------------------------------
         if is_stuck and not flash_used:
-            reward -= 0.1
-            
-        # 5. 滥用闪现惩罚
-        if flash_used and not is_high_pressure:
-            reward -= 0.2
+            if buff_remaining > 0:
+                reward -= 0.03
+            else:
+                reward -= 0.10
+
+        # ------------------------------------------------
+        # 6) 闪现质量奖励：不再只是“低压罚一下”
+        # ------------------------------------------------
+        if flash_used:
+            if not is_high_pressure:
+                reward -= 0.35
+            else:
+                # 在高压下，若明显拉开距离 / 缓解包夹 / 缓解出口封锁，则奖励
+                dist_gain = np.clip(min_monster_dist - self.last_min_monster_raw_dist, -5.0, 5.0)
+                reward += 0.08 * max(0.0, dist_gain)
+                reward += 0.15 * max(0.0, self.last_pincer_pressure - pincer_pressure)
+                reward += 0.04 * max(0.0, min_exit_monster_dist - self.last_min_exit_monster_dist)
+
+                # 高压下交闪但没改善局势，照样罚
+                if dist_gain < 0.5 and (self.last_pincer_pressure - pincer_pressure) < 0.05:
+                    reward -= 0.12
 
         return [float(reward)]
-
-    def _update_state(self, h_pos, min_monster_dist, openness, last_action, hero, env_info, treasures, buffs, move_passability):
+    def _update_state(
+        self,
+        h_pos,
+        min_monster_dist,
+        openness,
+        last_action,
+        hero,
+        env_info,
+        treasures,
+        buffs,
+        move_passability,
+        visit_age,
+        pincer_pressure,
+        min_exit_monster_dist,
+    ):
         self.last_min_monster_dist_norm = _norm(min_monster_dist, DIAG)
         self.last_min_monster_raw_dist = min_monster_dist
-        self.last_total_score = hero.get("step_score", self.step_no*1.5) + hero.get("treasure_score", 0)
+        self.last_total_score = hero.get("step_score", self.step_no * 1.5) + hero.get("treasure_score", 0)
         self.last_hero_pos = {"x": h_pos["x"], "z": h_pos["z"]}
         self.last_openness = openness
-        
+
         self.last_nearest_treasure_dist = min([_compute_dist(h_pos, t["pos"]) for t in treasures]) if treasures else None
         self.last_nearest_buff_dist = min([_compute_dist(h_pos, b["pos"]) for b in buffs]) if buffs else None
+
+        self.last_collected_buff = env_info.get("collected_buff", 0)
+        self.last_buff_remaining = hero.get("buff_remaining_time", 0)
+        self.last_flash_cd = hero.get("flash_cooldown", 0)
+        self.last_visit_age = visit_age
+        self.last_pincer_pressure = pincer_pressure
+        self.last_min_exit_monster_dist = min_exit_monster_dist
 
         self.position_history.append((h_pos["x"], h_pos["z"]))
         self.last_move_passability = move_passability
